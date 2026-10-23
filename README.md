@@ -1,117 +1,93 @@
 # izchu
 
-izchu 是一个私人骑行数据服务。当前 MVP 只读取数据，不会修改 Strava 或 Garmin 中的活动。
+> Your ride, your data.
 
-它现在可以：
+izchu 是一个面向 Strava 用户的开源、单用户、自托管活动摘要工具。每个人使用自己的 Strava API 应用，把服务部署在自己的 Cloudflare 账户中；活动与凭据不经过公共 izchu 服务器。
 
-- 通过 Strava OAuth 读取运动员、活动详情和逐点流数据，并自动轮换短期 token。
-- 通过 Garmin Connect 读取码表活动、训练效果、圈数、天气、心率区间和功率区间。
-- 下载 Garmin 原始活动文件并用 Garmin 官方 FIT SDK 解码功率、心率、踏频、左右平衡等实际记录字段。
-- 将 Garmin 原始响应、FIT 文件和完整解码结果保存在本地数据卷中，方便后续生成 Strava 描述。
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/abramyangCN/izchu)
 
-## 在群晖上启动
+## 当前版本做什么
 
-在 Container Manager 能访问的目录中放置本仓库，然后进入该目录：
+- 通过 Strava OAuth 读取最近活动、活动详情和可用的逐点 streams。
+- 根据 Strava 已收到的数据生成距离、时间、爬升、NP、IF、TSS、心率、踏频与做功摘要。
+- 每条活动都必须先手动生成、预览，再由用户确认写入 Strava。
+- 写入时保留原描述，只新增或更新带 izchu 标记的摘要区块。
+- Client Secret、access token 与 refresh token 使用管理员密码派生的密钥加密后存入 D1。
+- 自动刷新过期的 Strava access token。
 
-```bash
-cp .env.example .env
-```
+当前刻意不包含 Garmin Connect、后台定时任务、Webhook 或自动修改活动。若 Garmin 码表已经把数据同步给 Strava，izchu 能使用 Strava API 实际暴露出来的字段；Strava 未提供的 Garmin 专有指标不会凭空出现。
 
-编辑 `.env`：
+## 架构
 
-```dotenv
-IZCHU_STRAVA_CLIENT_ID=286135
-IZCHU_STRAVA_CLIENT_SECRET=你的_Strava_Client_Secret
-IZCHU_STRAVA_REDIRECT_URI=http://你的群晖地址:8080/api/strava/callback
-IZCHU_DATA_DIR=/data
-```
+- Cloudflare Workers：Hono API 与 Strava OAuth
+- Cloudflare D1：加密凭据、摘要历史与审计记录
+- React + Vite：首次设置、活动列表与摘要确认界面
+- Web Crypto：AES-GCM 数据加密与 HMAC 会话签名
 
-为容器创建私有数据目录（容器内运行用户 UID 为 `10001`）：
+一个仓库、一个 Worker、一个 D1 数据库，不需要群晖、常驻服务器或 Cron。
 
-```bash
-mkdir -p data
-sudo chown 10001:10001 data
-chmod 700 data
-chmod 600 .env
-```
+## 一键部署
 
-Strava API 设置页的 `Authorization Callback Domain` 必须与回调地址中的主机一致。若在同一台电脑本地运行，可保留 `localhost`。
+1. 点击上方 **Deploy to Cloudflare**。
+2. 授权 Cloudflare 创建 Worker 与 D1。
+3. 设置 `IZCHU_ADMIN_PASSWORD`。请使用一个独立且足够长的密码；它既是页面登录密码，也是 D1 敏感字段的加密根密钥，遗失后无法解密旧凭据。
+4. 打开部署后的网址，页面会显示 Strava 所需的回调域名。
+5. 在 [Strava API Settings](https://www.strava.com/settings/api) 创建应用，将该域名填入 **Authorization Callback Domain**。
+6. 回到 izchu 填写 Client ID、Client Secret 和可选 FTP，然后点击 **连接 Strava**。
 
-构建并启动：
+Strava 应用需要允许 `read`、`activity:read_all` 和 `activity:write`。写权限只在你点击并确认“写入 Strava”时使用。
 
-```bash
-docker compose up -d --build
-```
+## 本地开发
 
-打开 `http://你的群晖地址:8080/docs` 可看到交互式接口页面。
-
-## 连接 Strava
-
-浏览器打开：
-
-```text
-http://你的群晖地址:8080/api/strava/connect
-```
-
-完成授权后，izchu 会把 token 保存到 `data/strava-token.json`，文件权限为 `0600`。应用会在 token 临近过期时自动刷新，并保存 Strava 返回的新 refresh token。
-
-验证：
-
-```text
-GET /api/strava/athlete
-GET /api/strava/activities
-GET /api/strava/activities/{activity_id}
-GET /api/strava/activities/{activity_id}/streams
-```
-
-如果之前保存了有效的 `strava-token.json`，可在停掉容器后把它放进 `data/`，无需再次授权。不要把 token 提交到 Git。
-
-## 连接 Garmin Connect
-
-首次登录用一次性容器完成，密码不会写进数据卷：
+需要 Node.js 20.19+ 或 22.12+。
 
 ```bash
-docker compose run --rm izchu izchu garmin-login
+npm install
+cp .dev.vars.example .dev.vars
+npm run db:local
+npm run dev
 ```
 
-按提示输入 Garmin 邮箱、密码和可能出现的 MFA 验证码。成功后，可续期的登录 token 会保存在 `data/garmin-tokens/`；以后服务只使用 token。
-
-验证：
-
-```text
-GET  /api/garmin/activities?activity_type=cycling
-GET  /api/garmin/activities/{activity_id}
-POST /api/garmin/activities/{activity_id}/fit
-```
-
-第三个接口会下载并解析原始 FIT。完整逐秒记录默认只写入：
-
-```text
-data/activities/garmin-{activity_id}/fit-decoded.json
-```
-
-若确实需要在响应中返回全部逐秒记录，增加 `?include_records=true`。
-
-也可以直接检查从码表导出的本地文件：
+打开终端显示的本地地址，使用 `.dev.vars` 中的密码登录。常用检查：
 
 ```bash
-docker compose run --rm -v /你的目录:/imports:ro izchu \
-  izchu inspect-fit /imports/activity.fit
+npm run check
+```
+
+本地 D1 数据在 `.wrangler/` 中，`.dev.vars`、`.env`、`data/` 和所有本地数据库均已从 Git 排除。
+
+## 手动部署
+
+先登录 Cloudflare，然后创建 D1 数据库：
+
+```bash
+npx wrangler login
+npx wrangler d1 create izchu-db
+```
+
+将命令返回的 `database_id` 写入 `wrangler.jsonc`，再设置密码并部署：
+
+```bash
+npx wrangler secret put IZCHU_ADMIN_PASSWORD
+npm run deploy
 ```
 
 ## 数据与安全边界
 
-- `.env`、OAuth token、Garmin token、活动 JSON 和 FIT 文件都被 Git 忽略。
-- 当前 API 没有写活动接口，接入验证阶段不会覆盖 Strava 描述。
-- Garmin Connect 接入使用社区维护的非官方接口，可能因 Garmin 登录或字段变化需要升级依赖。
-- `data/` 包含位置、健康和训练数据；群晖目录不要开放匿名共享，外网访问前需要增加 HTTPS 和登录保护。
+- 每个实例只面向一个用户，不提供公共注册或多租户功能。
+- 管理员密码不会存进 D1，但更换它会导致既有加密数据无法读取；如需更换，应先重新配置 Strava。
+- 浏览器会话使用 `HttpOnly`、`SameSite=Lax` Cookie；生产环境自动启用 `Secure`。
+- 写操作校验请求来源，OAuth 使用短期 state 防止请求伪造。
+- Strava 凭据不会进入前端代码或 Git。
+- D1 会保存摘要与最小审计记录，不保存完整逐秒活动副本。
 
-## 本地开发
+## 产品原则
 
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
-.venv/bin/ruff check .
-```
+1. 手动优先：先预览，后确认，不在后台悄悄修改活动。
+2. 数据最少化：只保存运行所需的数据。
+3. 一人一实例：用户拥有部署、数据库和 API 凭据。
+4. Strava 优先：先把核心链路做到可靠，再考虑可选数据源。
 
+## 开源许可
+
+[MIT](LICENSE) — 可以自由使用、修改、部署与分发。
